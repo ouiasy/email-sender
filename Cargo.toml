@@ -1,0 +1,44 @@
+[package]
+name = "email_sender"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+path = "src/main.rs"
+name = "email_sender" # cargo run --bin email_senderのように起動するバイナリを指定できるようになる。
+
+[dependencies]
+axum = { version = "0.8.4", features = ["tokio", "macros"]}
+tokio = { version = "1.45.1", features = ["full"]}
+thiserror = "2.0.12"
+
+serde = { version = "1.0.219", features = ["derive"]}
+mime = "0.3.17"
+config = { version = "0.14.1"}
+uuid = { version = "1.17.0", features = ["v4"]}
+tower-http = { version = "0.6.6", features = ["trace"]}
+tracing = { version = "0.1.41", features = ["attributes"]}
+tracing-subscriber = { version = "0.3.19", features = ["json", "env-filter", "registry"] }
+
+[dependencies.sqlx]
+version = "0.8"
+default-features = false
+features = [
+    "runtime-tokio-rustls",
+    "macros",
+    "postgres",
+    "uuid",
+    "chrono",
+    "migrate"
+]
+
+[dev-dependencies]
+reqwest = { version = "0.12.19"  }
+hyper = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full"] }
+http-body-util = "0.1"
+hyper-util = { version = "0.1", features = ["full"] }
+

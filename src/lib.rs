@@ -1,9 +1,12 @@
 pub mod configuration;
+pub mod email_client;
 pub mod errors;
-mod handlers;
+pub mod handlers;
 mod telemetry;
-#[path = "middleware-examples.rs"]
-use crate::configuration::get_configuration;
+pub mod validation;
+
+use crate::configuration::{get_configuration, Settings};
+use crate::email_client::EmailClient;
 use crate::errors::AppError;
 use axum::Router;
 use axum::body::Bytes;
@@ -11,29 +14,52 @@ use axum::extract::{ConnectInfo, MatchedPath};
 use axum::http::{HeaderMap, Request};
 use axum::response::Response;
 use axum::routing::{get, post};
-use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{Connection, PgPool};
 use std::net::SocketAddr;
+use std::sync::{Arc, Once};
 use std::time::Duration;
 use tower_http::classify::ServerErrorsFailureClass;
-use tower_http::trace::{DefaultOnRequest, DefaultOnResponse, TraceLayer};
-use tracing::instrument::WithSubscriber;
+use tower_http::trace::TraceLayer;
 use tracing::{Span, info_span};
 use tracing_subscriber::EnvFilter;
-use tracing_subscriber::fmt::format::FmtSpan;
-use tracing_subscriber::util::SubscriberInitExt;
 
 pub async fn run() -> Result<(), AppError> {
     let conf = get_configuration().expect("error parsing configuration");
 
-    // todo: optionで詳細の設定
-    let conn = PgPool::connect_lazy(&conf.database.connection_string())
-        // .await
-        .expect("error getting connection pool from postgres");
+    let my_domain_email = conf
+        .email_client
+        .parse_email()
+        .expect("invalid sender email addr...");
+    let timeout = conf.email_client.timeout();
+    let email_client = EmailClient::new(
+        &conf.email_client.email_server_url,
+        my_domain_email,
+        &conf.email_client.authorization_token,
+        timeout
+    );
 
-    let app = app_internal(conn);
+    let pool = PgPoolOptions::new().connect_lazy_with(conf.database.connection_options());
     let addr = format!("0.0.0.0:{}", conf.application.port);
+    println!("trying to run server: {}", addr);
+    // println!("db target is {}:{}", conf.database.host);
 
-    println!("running server: {}", addr);
+    let conn = pool
+        .acquire()
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()));
+    conn?
+        .ping()
+        .await
+        .expect("error establishing db connection");
+
+    let app_state = AppState {
+        pg_pool: Arc::new(pool),
+        email_client: Arc::new(email_client),
+        conf: Arc::new(conf),
+    };
+    let app = app_internal(app_state);
+
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| AppError::EstablishServer(e.to_string()))?;
@@ -45,20 +71,34 @@ pub async fn run() -> Result<(), AppError> {
     .map_err(|e| AppError::EstablishServer(e.to_string()))
 }
 
-pub fn app_internal(pg_pool: PgPool) -> Router {
-    tracing_subscriber::fmt()
-        // ↓ 環境変数RUST_LOGからfilterするlevelを決定する
-        .with_env_filter(EnvFilter::from_default_env())
-        .with_target(false)
-        .with_level(true)
-        .with_file(false)
-        // .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
-        .json()
-        .init();
+static TRACING: Once = Once::new();
+
+fn init_tracing() {
+    TRACING.call_once(|| {
+        tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::from_default_env())
+            .with_target(false)
+            .with_level(true)
+            .with_file(false)
+            .json()
+            .init();
+    });
+}
+
+#[derive(Clone, Debug)]
+pub struct AppState {
+    pub pg_pool: Arc<PgPool>,
+    pub email_client: Arc<EmailClient>,
+    pub conf: Arc<Settings>
+}
+
+pub fn app_internal(app_state: AppState) -> Router {
+    init_tracing();
     Router::new()
         .route("/health/{name}", get(handlers::health_check::health))
         .route("/subscription", post(handlers::subscription::subscribe))
-        .with_state(pg_pool)
+        .route("/subscription/confirm", get(handlers::confirm_subscription::confirm))
+        .with_state(app_state)
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(|request: &Request<_>| {

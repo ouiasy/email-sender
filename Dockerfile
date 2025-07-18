@@ -16,6 +16,8 @@ FROM ubuntu:latest AS runtime
 
 WORKDIR /app
 ENV APP_ENV production
+#ENV APP_DATABASE__HOST 10.47.224.3
+ENV APP_DATABASE__HOST /cloudsql/examples-463000:asia-northeast1:newsletter
 
 RUN apt update -y \
     && apt install -y --no-install-recommends openssl ca-certificates \
@@ -26,4 +28,4 @@ RUN apt update -y \
 COPY --from=builder /app/target/release/email_sender ./email_sender
 COPY config ./config
 
-ENTRYPOINT [".email_sender"]
+ENTRYPOINT ["./email_sender"]
